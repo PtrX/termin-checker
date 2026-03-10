@@ -24,8 +24,10 @@ require('dotenv').config();
 // ═══════════════════════════════════════════════════════════════
 
 const CONFIG = {
-  // Termin-URL der Stadt Köln
-  url: 'https://termine.stadt-koeln.de/m/kfz-zulassung/extern/calendar/?uid=67523a04-37af-4131-9495-0a3566e0eb8b&wsid=d2c525a6-8d28-46d4-97dc-3349c54459ce&lang=de&set_lang_ui=de&rev=n3bt3',
+  // Offizielle Einstiegs-URL (von stadt-koeln.de verlinkt) — ohne wsid und rev,
+  // der Server weist bei jedem Aufruf eine frische Session zu.
+  // wsid + rev werden dynamisch vergeben → nie ablaufende Session-Probleme.
+  url: 'https://termine.stadt-koeln.de/m/kfz-zulassung/extern/calendar/?uid=67523a04-37af-4131-9495-0a3566e0eb8b',
 
   // Suchbegriff im Service-Text (Tabellenzeile neben dem Mengen-Dropdown)
   dienstleistung: 'Gebrauchtfahrzeug',
@@ -126,68 +128,55 @@ async function checkTermine() {
     // ── Schritt 1: Seite laden ──────────────────────────────────
     log('Lade Terminseite...');
     await page.goto(CONFIG.url, { waitUntil: 'networkidle', timeout: 30000 });
-    await page.waitForTimeout(1500);
+
+    // Session-Expiry abfangen (Fallback, sollte mit der neuen URL nicht passieren)
+    if (page.url().includes('session_expired')) {
+      throw new Error('Session abgelaufen — URL prüfen oder Standort-Server überlastet.');
+    }
 
     const title = await page.title();
     log(`Seite geladen: "${title}"`);
 
-    // ── Schritt 2: Richtige Service-Row finden und Menge setzen ─
-    // Die Seite hat pro Dienstleistung eine <tr> mit einem <select> (Menge 0-3)
-    // und dem Service-Namen daneben. Wir suchen die Row mit unserem Suchbegriff.
+    // ── Schritt 2: Warten bis Service-Tabelle geladen ist, dann Menge setzen ──
+    // Ohne waitForSelector war die Tabelle noch nicht im DOM (Timing-Problem in headless)
+    log(`Warte auf Service-Tabelle und wähle "${CONFIG.dienstleistung}"...`);
 
-    log(`Suche Service-Row mit Text: "${CONFIG.dienstleistung}"...`);
+    // Die Selects sitzen in <div class="service_container">, nicht in <tr>
+    try {
+      await page.waitForSelector('.service_container select', { timeout: 10000 });
+    } catch {
+      throw new Error('Service-Liste nicht gefunden — Seitenstruktur hat sich geändert?');
+    }
 
     const serviceSelected = await page.evaluate(({ suchtext, anzahl }) => {
-      const rows = document.querySelectorAll('tr');
-      for (const row of rows) {
-        const rowText = row.textContent || '';
-        if (rowText.toLowerCase().includes(suchtext.toLowerCase())) {
-          const sel = row.querySelector('select');
+      const containers = document.querySelectorAll('.service_container');
+      for (const container of containers) {
+        if (container.textContent.toLowerCase().includes(suchtext.toLowerCase())) {
+          const sel = container.querySelector('select');
           if (sel) {
             sel.value = anzahl;
-            // Change-Event auslösen damit die Seite reagiert
             sel.dispatchEvent(new Event('change', { bubbles: true }));
-            return {
-              found: true,
-              selectId: sel.id,
-              rowText: rowText.trim().substring(0, 120)
-            };
+            return { found: true, selectId: sel.id, value: sel.value,
+                     text: container.textContent.trim().replace(/\s+/g, ' ').substring(0, 100) };
           }
         }
       }
       return { found: false };
     }, { suchtext: CONFIG.dienstleistung, anzahl: CONFIG.anzahl });
 
-    if (!serviceSelected.found) {
-      log(`Service "${CONFIG.dienstleistung}" nicht gefunden! Prüfe Debug-Dateien.`, 'error');
-      // Debug: Alle Rows ausgeben
-      const allRows = await page.evaluate(() => {
-        return Array.from(document.querySelectorAll('tr'))
-          .filter(r => r.querySelector('select'))
-          .map(r => r.textContent.trim().substring(0, 120));
-      });
-      log(`Verfügbare Service-Rows:\n${allRows.join('\n')}`);
+    if (serviceSelected.found) {
+      log(`✓ Service: "${serviceSelected.text}" → Menge ${serviceSelected.value}`, 'success');
     } else {
-      log(`Service gefunden und gewählt: "${serviceSelected.rowText}"`, 'success');
-      log(`Select-ID: ${serviceSelected.selectId}, Menge: ${CONFIG.anzahl}`);
+      throw new Error(`Service "${CONFIG.dienstleistung}" nicht in der Liste gefunden.`);
     }
-
-    await page.waitForTimeout(1000);
 
     // ── Schritt 3: "Weiter" klicken ─────────────────────────────
-    log('Klicke auf "Weiter"...');
-    const weiterBtn = await page.$('button[type="submit"], input[type="submit"], button:has-text("Weiter")');
-    if (!weiterBtn) {
-      // Fallback: Text-Suche
-      await page.click('text=Weiter');
-    } else {
-      await weiterBtn.click();
-    }
-
+    log('Klicke "Weiter"...');
+    await page.click('button[type="submit"]');
     await page.waitForTimeout(3000);
 
     const newTitle = await page.title();
-    log(`Neue Seite: "${newTitle}"`);
+    log(`Terminseite: "${newTitle}"`);
 
     // ── Schritt 4: Verfügbare Termine lesen ─────────────────────
     // Die Terminseite zeigt Datum-Buttons: "Dienstag\n17.03.2026"
