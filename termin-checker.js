@@ -17,6 +17,7 @@
  */
 
 const { chromium } = require('playwright');
+require('dotenv').config();
 
 // ═══════════════════════════════════════════════════════════════
 // KONFIGURATION
@@ -47,8 +48,8 @@ const CONFIG = {
   // 2. Schreibe @userinfobot → deine Chat-ID kopieren
   telegram: {
     enabled: true,
-    botToken: 'REDACTED_USE_DOTENV',
-    chatId: '131630238',
+    botToken: process.env.TELEGRAM_BOT_TOKEN,
+    chatId: process.env.TELEGRAM_CHAT_ID,
   },
 
   // Browser sichtbar machen zum Debuggen (false = headless)
